@@ -17,7 +17,7 @@ st.title("⚖️ GNP Foundation — Qualitative Evidence & Verification Engine")
 st.caption("Auditable, grounded qualitative evidence extraction for organizational operating model redesign.")
 
 st.sidebar.header("1. Ingestion Configuration")
-api_key = st.sidebar.text_input("OpenAI API Key", type="password")
+api_key = st.sidebar.text_input("Gemini API Key", type="password")
 
 uploaded_files = st.sidebar.file_uploader(
     "Upload Interview Files (.txt)",
@@ -30,7 +30,7 @@ if "evidence_data" not in st.session_state:
 
 if st.sidebar.button("Run Evidence Pipeline", type="primary"):
     if not api_key:
-        st.sidebar.error("Please enter an OpenAI API Key.")
+        st.sidebar.error("Please enter a Gemini API Key.")
     elif not uploaded_files:
         st.sidebar.error("Please upload at least one .txt interview file.")
     else:
