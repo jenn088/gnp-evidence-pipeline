@@ -4,11 +4,11 @@ import requests
 from verifier import verify_quote
 from prompts import EXTRACTION_SYSTEM_PROMPT, QA_SYSTEM_PROMPT
 
+# Active models as per Google AI Studio
 CANDIDATE_MODELS = [
-    "gemini-2.0-flash",
-    "gemini-2.5-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-flash"
+    "gemini-3.6-flash",
+    "gemini-3-flash",
+    "gemini-flash"
 ]
 
 
