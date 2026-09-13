@@ -1,44 +1,39 @@
 """
 pipeline.py
-Ingestion, LLM extraction, and deterministic verification coordination.
+Ingestion, Gemini extraction, and deterministic verification coordination.
 """
 
 import json
 from typing import List, Dict, Any
-from openai import OpenAI
+import google.generativeai as genai
 from verifier import verify_quote
 from prompts import EXTRACTION_SYSTEM_PROMPT, QA_SYSTEM_PROMPT
 
 
 def run_extraction_pipeline(files_dict: Dict[str, str], api_key: str) -> List[Dict[str, Any]]:
-    client = OpenAI(api_key=api_key)
+    genai.configure(api_key=api_key)
+    
+    # Configure Gemini with JSON schema output enforcement
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        system_instruction=EXTRACTION_SYSTEM_PROMPT,
+        generation_config={"response_mime_type": "application/json", "temperature": 0.0}
+    )
+
     all_evidence = []
     evidence_id = 1
 
     for filename, raw_text in files_dict.items():
-        user_prompt = f"""DOCUMENT FILENAME: {filename}
+        prompt = f"""DOCUMENT FILENAME: {filename}
 CONTENT:
 \"\"\"{raw_text}\"\"\"
 
 Extract all distinct evidence points according to instructions. Return pure JSON."""
 
         try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.0
-            )
-
-            raw_resp = response.choices[0].message.content.strip()
-            if raw_resp.startswith("```json"):
-                raw_resp = raw_resp[7:]
-            if raw_resp.endswith("```"):
-                raw_resp = raw_resp[:-3]
-
-            extracted_items = json.loads(raw_resp.strip())
+            response = model.generate_content(prompt)
+            raw_resp = response.text.strip()
+            extracted_items = json.loads(raw_resp)
 
             for item in extracted_items:
                 quote = item.get("verbatim_quote", "")
@@ -66,26 +61,27 @@ Extract all distinct evidence points according to instructions. Return pure JSON
 
 
 def ask_evidence_query(query: str, evidence_list: List[Dict[str, Any]], api_key: str) -> Dict[str, Any]:
-    client = OpenAI(api_key=api_key)
+    genai.configure(api_key=api_key)
+    
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        system_instruction=QA_SYSTEM_PROMPT,
+        generation_config={"temperature": 0.0}
+    )
 
     context_str = "\n".join([
         f"[{e['id']}] ({e['file']} - {e['speaker']}) Theme: {e['theme']} | \"{e['quote']}\""
         for e in evidence_list if e.get("verified", False)
     ])
 
-    messages = [
-        {"role": "system", "content": QA_SYSTEM_PROMPT},
-        {"role": "user", "content": f"Context Evidence:\n{context_str}\n\nQuestion: {query}"}
+    prompt = f"Context Evidence:\n{context_str}\n\nQuestion: {query}"
+    response = model.generate_content(prompt)
+    answer_text = response.text.strip()
+
+    cited_evidence = [
+        e for e in evidence_list 
+        if e['id'] in answer_text or e['speaker'].lower() in answer_text.lower()
     ]
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        temperature=0.0
-    )
-
-    answer_text = response.choices[0].message.content.strip()
-    cited_evidence = [e for e in evidence_list if e['id'] in answer_text or e['speaker'].lower() in answer_text.lower()]
 
     return {
         "answer": answer_text,
