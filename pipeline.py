@@ -1,71 +1,4 @@
-"""
-pipeline.py
-Ingestion, Gemini REST extraction (supporting AQ. and AIza keys),
-and deterministic verification coordination.
-"""
-
-import json
-from typing import List, Dict, Any
-import requests
-from verifier import verify_quote
-from prompts import EXTRACTION_SYSTEM_PROMPT, QA_SYSTEM_PROMPT
-
-
-def call_gemini_api(prompt: str, system_prompt: str, api_key: str, json_mode: bool = False) -> str:
-    """Calls Gemini REST API directly using header authentication for AQ. keys."""
-    clean_key = api_key.strip()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={clean_key}"
-    
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": clean_key
-    }
-    
-    payload = {
-        "system_instruction": {
-            "parts": [{"text": system_prompt}]
-        },
-        "contents": [
-            {"parts": [{"text": prompt}]}
-        ],
-        "generationConfig": {
-            "temperature": 0.0
-        }
-    }
-    
-    if json_mode:
-        payload["generationConfig"]["response_mime_type"] = "application/json"
-        
-    response = requests.post(url, headers=headers, json=payload, timeout=60)
-    
-    if response.status_code != 200:
-        raise RuntimeError(f"Gemini API Error {response.status_code}: {response.text}")
-        
-    res_json = response.json()
-    return res_json["candidates"][0]["content"]["parts"][0]["text"]
-
-
-def run_extraction_pipeline(files_dict: Dict[str, str], api_key: str) -> List[Dict[str, Any]]:
-    all_evidence = []
-    evidence_id = 1
-
-    for filename, raw_text in files_dict.items():
-        prompt = f"""DOCUMENT FILENAME: {filename}
-CONTENT:
-\"\"\"{raw_text}\"\"\"
-
-Extract all distinct evidence points according to instructions. Return pure JSON."""
-
-        try:
-            raw_resp = call_gemini_api(
-                prompt=prompt,
-                system_prompt=EXTRACTION_SYSTEM_PROMPT,
-                api_key=api_key,
-                json_mode=True
-            ).strip()
-
-            if raw_resp.startswith("```json"):
-                raw_resp = raw_resp[7:]
+raw_resp = raw_resp[7:]
             if raw_resp.endswith("```"):
                 raw_resp = raw_resp[:-3]
 
@@ -120,3 +53,13 @@ def ask_evidence_query(query: str, evidence_list: List[Dict[str, Any]], api_key:
         "answer": answer_text,
         "cited_evidence": cited_evidence[:4]
     }
+</code></pre>
+  </Step>
+
+  <Step subtitle="Commit & Test" title="Commit Changes and Test">
+    1. Click the green <strong>Commit changes...</strong> button &rarr; <strong>Commit changes</strong>.<br/>
+    2. Wait 30 seconds, then refresh your Streamlit app page in your browser.<br/>
+    3. Paste your key, upload the 5 interview files, and click <strong>Run Evidence Pipeline</strong>.
+    <br/><em>Verification:</em> The 404 error disappears, and a green success banner appears indicating all quotes have been extracted and verified.
+  </Step>
+</Steps>
