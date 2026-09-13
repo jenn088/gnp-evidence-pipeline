@@ -1,14 +1,19 @@
+"""
+pipeline.py
+Resilient Gemini pipeline with automatic 503/429 retry and fallback models.
+"""
+
 import json
+import time
 from typing import List, Dict, Any
 import requests
 from verifier import verify_quote
 from prompts import EXTRACTION_SYSTEM_PROMPT, QA_SYSTEM_PROMPT
 
-# Active models as per Google AI Studio
-CANDIDATE_MODELS = [
+# Models with active support on v1beta
+ACTIVE_MODELS = [
     "gemini-3.6-flash",
-    "gemini-3-flash",
-    "gemini-flash"
+    "gemini-3.6-pro"
 ]
 
 
@@ -31,20 +36,35 @@ def call_gemini_api(prompt: str, system_prompt: str, api_key: str, json_mode: bo
     if json_mode:
         payload["generationConfig"]["response_mime_type"] = "application/json"
 
-    errors = []
-    for model in CANDIDATE_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={clean_key}"
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=60)
-            if resp.status_code == 200:
-                data = resp.json()
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-            else:
-                errors.append(f"{model} -> HTTP {resp.status_code}: {resp.text}")
-        except Exception as e:
-            errors.append(f"{model} -> Exception: {str(e)}")
+    max_retries = 3
+    last_error = ""
 
-    raise RuntimeError("All Gemini endpoints failed:\n" + "\n".join(errors))
+    for model in ACTIVE_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={clean_key}"
+        
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=60)
+                
+                # Success
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                
+                # Temporary high demand (503) or rate limit (429) -> retry after short sleep
+                elif resp.status_code in [503, 429]:
+                    time.sleep(2 * (attempt + 1))
+                    last_error = f"{model} (HTTP {resp.status_code}): {resp.text}"
+                    continue
+                
+                else:
+                    last_error = f"{model} (HTTP {resp.status_code}): {resp.text}"
+                    break
+            except Exception as e:
+                last_error = f"{model} (Exception): {str(e)}"
+                time.sleep(1)
+
+    raise RuntimeError(f"Gemini API Error after retries: {last_error}")
 
 
 def run_extraction_pipeline(files_dict: Dict[str, str], api_key: str) -> List[Dict[str, Any]]:
