@@ -2,8 +2,8 @@
 app.py
 Streamlit web application for the GNP Evidence Pipeline.
 Features:
-1. Evidence Matrix (with Context preservation)
-2. Deterministic Verification Report
+1. Dynamic Thematic Discovery & Evidence Matrix
+2. Deterministic Verification Audit
 3. Grounded Q&A (gemini-3.6-flash)
 4. Linguistic Methodology & Filter Logic
 """
@@ -13,13 +13,13 @@ import pandas as pd
 from pipeline import run_extraction_pipeline, ask_evidence_query
 
 st.set_page_config(
-    page_title="GNP Foundation | Evidence Pipeline",
+    page_title="Evidence & Transformation Pipeline",
     page_icon="⚖️",
     layout="wide"
 )
 
-st.title("⚖️ GNP Foundation — Qualitative Evidence & Verification Engine")
-st.caption("Subheading-aware quote extraction, authentic speaker attribution, and deterministic verification.")
+st.title("⚖️ Qualitative Evidence & Transformation Engine")
+st.caption("Dynamic inductive thematic discovery, subheading-aware extraction, and deterministic verification.")
 
 api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
 
@@ -33,43 +33,56 @@ uploaded_files = st.sidebar.file_uploader(
 if "evidence_data" not in st.session_state:
     st.session_state.evidence_data = []
 
+if "discovered_themes" not in st.session_state:
+    st.session_state.discovered_themes = []
+
 if st.sidebar.button("Run Evidence Pipeline", type="primary"):
     if not api_key:
         st.sidebar.error("System configuration error: GEMINI_API_KEY is missing from app secrets.")
     elif not uploaded_files:
         st.sidebar.error("Please upload at least one .txt interview file.")
     else:
-        with st.spinner("Classifying subheadings, preserving context, and running audits..."):
+        with st.spinner("Analyzing uploaded corpus, dynamically discovering themes, and running audits..."):
             try:
                 files_dict = {f.name: f.read().decode("utf-8") for f in uploaded_files}
-                st.session_state.evidence_data = run_extraction_pipeline(files_dict, api_key)
+                data, themes = run_extraction_pipeline(files_dict, api_key)
+                st.session_state.evidence_data = data
+                st.session_state.discovered_themes = themes
+                
                 quotes_count = sum(1 for e in st.session_state.evidence_data if e["is_interviewee_quote"])
                 st.sidebar.success(
-                    f"Extracted {len(st.session_state.evidence_data)} total items "
-                    f"({quotes_count} verified interviewee quotes, "
-                    f"{len(st.session_state.evidence_data) - quotes_count} proxy notes/summaries)!"
+                    f"Discovered {len(themes)} dynamic transformation themes across "
+                    f"{len(st.session_state.evidence_data)} total items ({quotes_count} verified quotes)!"
                 )
             except Exception as ex:
                 st.error(f"Pipeline Error: {str(ex)}")
 
-# Four Main Tabs
 tab1, tab2, tab3, tab4 = st.tabs([
-    "📊 Evidence Matrix",
+    "📊 Dynamic Evidence Matrix",
     "🔍 Verification Report",
     "💬 Grounded Q&A",
     "📖 Linguistic Methodology & Filter Logic"
 ])
 
-# Tab 1: Evidence Matrix with Context Column
+# Tab 1: Dynamic Evidence Matrix
 with tab1:
     if not st.session_state.evidence_data:
-        st.info("Upload the 5 interview files in the sidebar and click **Run Evidence Pipeline**.")
+        st.info("Upload interview files in the sidebar and click **Run Evidence Pipeline**.")
     else:
+        # Showcase the dynamically discovered transformation themes
+        if st.session_state.discovered_themes:
+            st.markdown("### 🎯 Inductively Discovered Transformation Themes")
+            t_cols = st.columns(len(st.session_state.discovered_themes))
+            for i, theme_obj in enumerate(st.session_state.discovered_themes):
+                with t_cols[i]:
+                    st.info(f"**{theme_obj['theme_title']}**\n\n{theme_obj.get('description', '')}")
+            st.divider()
+
         df = pd.DataFrame(st.session_state.evidence_data)
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            theme_choice = st.selectbox("Filter Theme", ["All"] + sorted(df["theme"].unique().tolist()))
+            theme_choice = st.selectbox("Filter Dynamic Theme", ["All"] + sorted(df["theme"].unique().tolist()))
         with col2:
             speaker_choice = st.selectbox("Filter Speaker", ["All"] + sorted(df["speaker"].unique().tolist()))
         with col3:
@@ -103,8 +116,9 @@ with tab1:
             use_container_width=True,
             height=460,
             column_config={
+                "theme": st.column_config.TextColumn("Dynamic Theme", width="medium"),
                 "quote": st.column_config.TextColumn("Verbatim Quote", width="medium"),
-                "context": st.column_config.TextColumn("Context / Surrounding Notes", width="large"),
+                "context": st.column_config.TextColumn("Context / Notes", width="large"),
             }
         )
 
@@ -133,6 +147,7 @@ with tab2:
             badge = "✅ VERIFIED" if row["verified"] else "❌ FAILED"
             with st.expander(f"{row['id']} | {row['speaker']} — {badge} ({row['match_type']})"):
                 st.write(f"**Verbatim Quote:** \"{row['quote']}\"")
+                st.write(f"**Assigned Dynamic Theme:** `{row['theme']}`")
                 st.write(f"**Context:** `{row['context']}`")
                 st.write(f"**Source Document:** `{row['file']}`")
                 st.write(f"**Verification Match:** `{row['match_type']}` (Similarity: {row['similarity_score']})")
@@ -142,7 +157,7 @@ with tab3:
     st.subheader("Ask the Interview Evidence")
     query = st.text_input(
         "Enter your strategic question:",
-        placeholder="e.g., What are the biggest barriers to effective decision-making?"
+        placeholder="e.g., What are the primary root causes driving the need for organizational change?"
     )
 
     if st.button("Submit Question"):
@@ -153,7 +168,7 @@ with tab3:
         elif not query:
             st.warning("Please type a question.")
         else:
-            with st.spinner("Querying grounded evidence base using gemini-3.6-flash..."):
+            with st.spinner("Synthesizing answer grounded in verified evidence..."):
                 try:
                     res = ask_evidence_query(query, st.session_state.evidence_data, api_key)
                     st.markdown("### Synthesized Finding")
@@ -164,124 +179,38 @@ with tab3:
                         for ev in res["cited_evidence"]:
                             st.success(
                                 f"**\"{ev['quote']}\"**\n\n— *{ev['speaker']} ({ev['file']})*\n\n"
-                                f"*Context: {ev['context']}*"
+                                f"*Dynamic Theme: {ev['theme']} | Context: {ev['context']}*"
                             )
                 except Exception as ex:
                     st.error(f"Query Error: {str(ex)}")
 
-# Tab 4: Linguistic Methodology & Filter Logic
+# Tab 4: Linguistic Methodology
 with tab4:
     st.header("📖 Quote Qualification Methodology & Linguistic Rules")
     st.markdown(
         """
-        Consulting interview notes are inherently heterogeneous: they blend **verbatim quotes**, 
-        **relayed third-party feedback**, and **telegraphic notetaker summaries**. 
-        
-        To prevent subjective LLM extraction variances, this application executes a **deterministic, 
-        rules-based linguistic filter** before any semantic processing occurs.
+        Consulting interview notes blend **verbatim quotes**, **relayed third-party feedback**, and **telegraphic notetaker summaries**. 
+        This application executes a **deterministic, rules-based linguistic filter** coupled with **dynamic inductive thematic discovery**.
         """
     )
-    
     st.divider()
-
-    st.subheader("The 6-Stage Linguistic Qualification Framework")
 
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("#### 1. Subheading Semantic Scoping (Attribution Guard)")
-        st.info(
-            """
-            **The Challenge:** Sections titled `REQUESTS FROM GRANTEES` or `GRANTEE MESSAGES` relay external complaints. 
-            Treating first-person words here as executive quotes causes false attribution.
-            
-            **The Rule:** Subheadings containing `GRANTEE`, `SURVEY`, or `EXTERNAL` are tagged as **Grantee Voice**. 
-            They are isolated from executive verbatims so they are never misattributed to the interviewee.
-            """
-        )
+        st.markdown("#### 1. Inductive Thematic Synthesis")
+        st.info("Analyzes the entire uploaded quote corpus dynamically to discover 4-6 systemic transformation pillars specific to what stakeholders shared.")
 
-        st.markdown("#### 2. Multi-Bullet Thought Overflow Stitching")
-        st.info(
-            """
-            **The Challenge:** Notetakers frequently break a single spoken sentence across multiple lines with a bullet.
-            
-            **The Rule:** If bullet $N+1$ begins with an adversative/causal connector (`but`, `because`, `so`, `and`, `e.g.`) 
-            or a lowercase character, it is syntactically stitched to bullet $N$ as a single coherent utterance.
-            """
-        )
+        st.markdown("#### 2. Subheading Semantic Scoping")
+        st.info("Subheadings containing `GRANTEE` or `SURVEY` are isolated as **Grantee Voice** so external feedback is never misattributed to the interviewee.")
 
-        st.markdown("#### 3. Shorthand Meta-Label & Prefix Stripping")
-        st.info(
-            """
-            **The Challenge:** Bullets often begin with notetaker labels followed by a dash or colon 
-            (e.g., *'PAIN POINTS — We just don't deliver well'*).
-            
-            **The Rule:** The prefix regex strips structural tags (`PAIN POINTS —`) to isolate the actual spoken words, 
-            while retaining the original label in the **Context** column.
-            """
-        )
-
+        st.markdown("#### 3. Thought Overflow Stitching")
+        st.info("Connects multi-bullet sentence overflows starting with conjunctions (`but`, `because`, `so`) into unified executive utterances.")
     with c2:
-        st.markdown("#### 4. The Finite Verb Test (Excluding Shorthand)")
-        st.success(
-            """
-            **The Challenge:** Notetakers write shorthand lists (e.g., *'Training costs'*, *'Facilities'*, *'Smart people'*). 
-            These are observational notes, not spoken quotes.
-            
-            **The Rule:** An item must contain at least one conjugated **finite verb** (*is, are, have, want, struggle, deliver*). 
-            Pure noun phrases are automatically routed to *Notetaker Notes*.
-            """
-        )
+        st.markdown("#### 4. The Finite Verb Test")
+        st.success("Excludes pure notetaker noun lists (*'Training costs'*, *'Facilities'*); requires active finite predicates.")
 
-        st.markdown("#### 5. Deictic & Conversational Voice Grounding")
-        st.success(
-            """
-            **The Challenge:** Distinguishing between third-person summary bullets and active spoken voice.
-            
-            **The Rule:** Candidate quotes must contain first-person pronouns (`I`, `we`, `our`, `us`, `I'm`, `we're`) 
-            or take the form of executive rhetorical questions (*'How do we show up to our grantees...'*).
-            """
-        )
+        st.markdown("#### 5. Deictic Spoken Voice Grounding")
+        st.success("Anchors quotes in first-person executive voice (`I`, `we`, `our`, `us`) and rhetorical leadership questions.")
 
-        st.markdown("#### 6. Disambiguation of Quotation Marks")
-        st.success(
-            """
-            **The Challenge:** Quotation marks in notes are often used to name initiatives or buzzwords 
-            (e.g., *'moving away from "command and control"'* or *'"My President\'s Discretionary Fund"'*).
-            
-            **The Rule:** Quoted substrings are only isolated as direct quotes if they constitute a complete grammatical clause 
-            ($\ge 4$ words with a verb). Isolated nouns in quotes remain embedded within their full bullet context.
-            """
-        )
-
-    st.divider()
-
-    st.subheader("Comparison Table: How Content is Classified")
-    
-    classification_examples = [
-        {
-            "Raw Bullet from Notes": "- We just don't deliver well. The hierarchy causes leadership to struggle with how to get approvals",
-            "Classification": "Interviewee Quote (Spoken Verbatim)",
-            "Reasoning": "Active first-person voice ('We'), contains finite verbs ('deliver', 'struggle'), expresses speaker's direct experience."
-        },
-        {
-            "Raw Bullet from Notes": "- \"Our current structure relies too much on 'one person at the top having the answer'\"",
-            "Classification": "Interviewee Quote (Direct Quote)",
-            "Reasoning": "Full grammatical clause enclosed in double quotes; contains finite verb ('relies')."
-        },
-        {
-            "Raw Bullet from Notes": "- \"How does the Foundation show up in these communities?\" (under 'REQUESTS FROM GRANTEES')",
-            "Classification": "Grantee Voice (Relayed Feedback)",
-            "Reasoning": "Subheading identifies external stakeholder context; attributed to Grantee Feedback, not the Head of Learning."
-        },
-        {
-            "Raw Bullet from Notes": "- Training costs / Facilities / Smart people",
-            "Classification": "Notetaker Note (Paraphrase)",
-            "Reasoning": "Lacks finite verbs and subject-predicate structure; identified as notetaker shorthand indexing."
-        },
-        {
-            "Raw Bullet from Notes": "- We are committed to the success of CEO... / - BUT until we know what shifting roles looks like...",
-            "Classification": "Stitched Interviewee Quote",
-            "Reasoning": "Second bullet starts with 'BUT', indicating an adversative continuation; stitched into a unified statement."
-        }
-    ]
-    st.table(pd.DataFrame(classification_examples))
+        st.markdown("#### 6. Shorthand Prefix Stripping")
+        st.success("Strips analytical notetaker prefixes (`PAIN POINTS —`) to isolate the speaker's true words, preserving context in an audit column.")
