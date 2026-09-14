@@ -1,7 +1,7 @@
 """
 app.py
 Streamlit web application for the GNP Evidence Pipeline.
-Features subheading-aware speaker attribution, quote filtering, and audit tracking.
+Displays quote context in Tab 1 and runs grounded Q&A on gemini-3.6-flash.
 """
 
 import streamlit as st
@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("⚖️ GNP Foundation — Qualitative Evidence & Verification Engine")
-st.caption("Subheading-aware quote extraction, authentic speaker attribution, and deterministic verification.")
+st.caption("Subheading-aware quote extraction, contextual grounding, and deterministic verification.")
 
 api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
 
@@ -35,7 +35,7 @@ if st.sidebar.button("Run Evidence Pipeline", type="primary"):
     elif not uploaded_files:
         st.sidebar.error("Please upload at least one .txt interview file.")
     else:
-        with st.spinner("Classifying subheadings, attributing speakers, and verifying text..."):
+        with st.spinner("Classifying subheadings, preserving context, and running audits..."):
             try:
                 files_dict = {f.name: f.read().decode("utf-8") for f in uploaded_files}
                 st.session_state.evidence_data = run_extraction_pipeline(files_dict, api_key)
@@ -50,7 +50,7 @@ if st.sidebar.button("Run Evidence Pipeline", type="primary"):
 
 tab1, tab2, tab3 = st.tabs(["📊 Evidence Matrix", "🔍 Verification Report", "💬 Grounded Q&A"])
 
-# Tab 1: Evidence Matrix
+# Tab 1: Evidence Matrix with Context Column
 with tab1:
     if not st.session_state.evidence_data:
         st.info("Upload the 5 interview files in the sidebar and click **Run Evidence Pipeline**.")
@@ -88,10 +88,15 @@ with tab1:
         if verified_filter:
             filtered = filtered[filtered["verified"] == True]
 
+        # Context column displayed right alongside the quote
         st.dataframe(
-            filtered[["id", "theme", "speaker", "evidence_type", "quote", "file", "verified", "match_type"]],
+            filtered[["id", "theme", "speaker", "quote", "context", "file", "verified", "match_type"]],
             use_container_width=True,
-            height=450
+            height=460,
+            column_config={
+                "quote": st.column_config.TextColumn("Verbatim Quote", width="medium"),
+                "context": st.column_config.TextColumn("Context / Surrounding Notes", width="large"),
+            }
         )
 
 # Tab 2: Verification Report
@@ -117,9 +122,10 @@ with tab2:
         st.subheader("Audited Interviewee Verbatims")
         for _, row in quotes_df.iterrows():
             badge = "✅ VERIFIED" if row["verified"] else "❌ FAILED"
-            with st.expander(f"{row['id']} | {row['speaker']} [{row['evidence_type']}] — {badge}"):
+            with st.expander(f"{row['id']} | {row['speaker']} — {badge} ({row['match_type']})"):
                 st.write(f"**Verbatim Quote:** \"{row['quote']}\"")
-                st.write(f"**Source Document:** `{row['file']}` ({row['context']})")
+                st.write(f"**Context:** `{row['context']}`")
+                st.write(f"**Source Document:** `{row['file']}`")
                 st.write(f"**Verification Match:** `{row['match_type']}` (Similarity: {row['similarity_score']})")
 
 # Tab 3: Grounded Q&A
@@ -127,7 +133,7 @@ with tab3:
     st.subheader("Ask the Interview Evidence")
     query = st.text_input(
         "Enter your strategic question:",
-        placeholder="e.g., What did leadership say about decision-making bottlenecks?"
+        placeholder="e.g., What are the biggest barriers to effective decision-making?"
     )
 
     if st.button("Submit Question"):
@@ -138,7 +144,7 @@ with tab3:
         elif not query:
             st.warning("Please type a question.")
         else:
-            with st.spinner("Synthesizing answer grounded in verified evidence..."):
+            with st.spinner("Querying grounded evidence base using gemini-3.6-flash..."):
                 try:
                     res = ask_evidence_query(query, st.session_state.evidence_data, api_key)
                     st.markdown("### Synthesized Finding")
@@ -148,7 +154,8 @@ with tab3:
                         st.markdown("#### Direct Verified Citations")
                         for ev in res["cited_evidence"]:
                             st.success(
-                                f"**\"{ev['quote']}\"**\n\n— *{ev['speaker']} ({ev['file']})* [Type: {ev['evidence_type']}]"
+                                f"**\"{ev['quote']}\"**\n\n— *{ev['speaker']} ({ev['file']})*\n\n"
+                                f"*Context: {ev['context']}*"
                             )
                 except Exception as ex:
                     st.error(f"Query Error: {str(ex)}")
