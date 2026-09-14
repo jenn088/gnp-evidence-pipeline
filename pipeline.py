@@ -1,7 +1,7 @@
 """
 pipeline.py
-Subheading-aware linguistic extraction and deterministic verification engine.
-Prevents misattributing relayed feedback (e.g., grantee voices) to interviewees.
+Subheading-aware extraction, quote context preservation,
+and direct gemini-3.6-flash API communication.
 """
 
 import re
@@ -12,9 +12,9 @@ import requests
 from verifier import verify_quote
 from prompts import CLASSIFICATION_SYSTEM_PROMPT, QA_SYSTEM_PROMPT
 
-WORKING_MODEL = None
+# Enforce active supported model
+ACTIVE_MODEL = "gemini-3.6-flash"
 
-# Subheadings that reflect external stakeholder voices or proxy survey feedback
 PROXY_SECTION_PATTERNS = re.compile(
     r'(GRANTEE|SURVEY|COMMUNITY REQUESTS|EXTERNAL|FEEDBACK|FUTURE DEMANDS)',
     re.IGNORECASE
@@ -43,53 +43,17 @@ CONTINUATION_START_PATTERN = re.compile(
 )
 
 
-def get_available_model(api_key: str) -> str:
-    global WORKING_MODEL
-    if WORKING_MODEL:
-        return WORKING_MODEL
-
-    clean_key = api_key.strip()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={clean_key}"
-
-    try:
-        resp = requests.get(url, timeout=30)
-        if resp.status_code == 200:
-            models_data = resp.json().get("models", [])
-            compatible = [
-                m["name"].replace("models/", "")
-                for m in models_data
-                if "generateContent" in m.get("supportedGenerationMethods", [])
-            ]
-            flash_candidates = [m for m in compatible if "flash" in m]
-            if flash_candidates:
-                WORKING_MODEL = flash_candidates[0]
-                return WORKING_MODEL
-            elif compatible:
-                WORKING_MODEL = compatible[0]
-                return WORKING_MODEL
-    except Exception as e:
-        print(f"Model discovery fallback: {e}")
-
-    WORKING_MODEL = "gemini-3.6-flash"
-    return WORKING_MODEL
-
-
 def extract_primary_speaker(filename: str, text: str) -> str:
-    """Derives interviewee role from document header and filename."""
     lines = text.strip().splitlines()
     if lines and "|" in lines[0]:
         return lines[0].split("|")[-1].strip()
     
-    # Fallback to file name cleaning
     clean_name = filename.replace(".txt", "").replace("interview_", "")
     clean_name = re.sub(r'^\d+_', '', clean_name)
     return clean_name.replace("_", " ").title()
 
 
 def parse_document_structure(raw_text: str) -> List[Dict[str, Any]]:
-    """
-    Parses sections, binds subheadings to bullets, and stitches sentence overflows.
-    """
     lines = raw_text.splitlines()
     bullets = []
     current_sec = "GENERAL"
@@ -99,19 +63,16 @@ def parse_document_structure(raw_text: str) -> List[Dict[str, Any]]:
         if not s:
             continue
 
-        # Header detection
         if not s.startswith("-") and not s.startswith("*") and not s.startswith("[source:") and not s.startswith("GNP FOUNDATION"):
             if s.isupper() or "—" in s or "-" in s:
                 current_sec = s.replace("—", "-").strip()
                 continue
 
-        # Bullet line parsing
         if s.startswith("-") or s.startswith("*"):
             body = s.lstrip("-*").strip()
             if body:
                 bullets.append({"section": current_sec, "raw": body})
 
-    # Stitch thought overflows
     stitched_items = []
     i = 0
     while i < len(bullets):
@@ -136,15 +97,13 @@ def parse_document_structure(raw_text: str) -> List[Dict[str, Any]]:
     return stitched_items
 
 
-def classify_bullet_linguistics(item_text: str, section: str, primary_speaker: str) -> Tuple[str, str, str, bool]:
+def classify_bullet_linguistics(item_text: str, section: str, primary_speaker: str) -> Tuple[str, str, str, str, bool]:
     """
-    Classifies speaker, evidence type, and authentic quote status.
-    Returns: (attributed_speaker, evidence_type, candidate_quote, is_interviewee_quote)
+    Returns: (attributed_speaker, evidence_type, candidate_quote, descriptive_context, is_interviewee_quote)
     """
     text = item_text.strip()
     is_proxy_section = bool(PROXY_SECTION_PATTERNS.search(section))
 
-    # Determine speaker attribution based on subheading context
     if is_proxy_section:
         attributed_speaker = f"Grantee Feedback (via {primary_speaker})"
     else:
@@ -154,11 +113,13 @@ def classify_bullet_linguistics(item_text: str, section: str, primary_speaker: s
     explicit_matches = re.findall(r'"([^"]+)"', text)
     for q in explicit_matches:
         if len(q.split()) >= 4 and FINITE_VERB_PATTERN.search(q):
+            # The context is the original surrounding text and section
+            context_desc = f"[{section}] {text}"
             if is_proxy_section:
-                return attributed_speaker, "Grantee Voice", q, False
-            return attributed_speaker, "Direct Quote", q, True
+                return attributed_speaker, "Grantee Voice", q, context_desc, False
+            return attributed_speaker, "Direct Quote", q, context_desc, True
 
-    # Check 2: Strip shorthand prefixes
+    # Check 2: Shorthand prefix stripping
     candidate = text
     prefix_match = NOTE_PREFIX_PATTERN.match(text)
     if prefix_match:
@@ -166,6 +127,9 @@ def classify_bullet_linguistics(item_text: str, section: str, primary_speaker: s
         remainder = text[len(prefix):].strip()
         if len(remainder.split()) >= 4:
             candidate = remainder
+
+    # Context retains the full untouched bullet plus section
+    context_desc = f"[{section}] {text}"
 
     # Check 3: Spoken Voice Evaluation
     has_first_person = bool(FIRST_PERSON_PATTERN.search(candidate))
@@ -176,23 +140,20 @@ def classify_bullet_linguistics(item_text: str, section: str, primary_speaker: s
         candidate.lower().startswith(w) for w in ["how do we", "how does", "what are", "why"]
     )
 
-    if (has_first_person and has_finite_verb and word_count >= 5) or (is_rhetorical and word_count >= 4):
+    if (has_first_person and has_finite_verb and word_count >= 4) or (is_rhetorical and word_count >= 3):
         if not candidate.lower().startswith("mantra of"):
             if is_proxy_section:
-                return attributed_speaker, "Grantee Voice", candidate, False
-            return attributed_speaker, "Spoken Verbatim", candidate, True
+                return attributed_speaker, "Grantee Voice", candidate, context_desc, False
+            return attributed_speaker, "Spoken Verbatim", candidate, context_desc, True
 
-    # Notetaker Paraphrase
     if is_proxy_section:
-        return attributed_speaker, "Grantee Summary", text, False
-    return attributed_speaker, "Notetaker Note", text, False
+        return attributed_speaker, "Grantee Summary", text, context_desc, False
+    return attributed_speaker, "Notetaker Note", text, context_desc, False
 
 
 def call_gemini_api(prompt: str, system_prompt: str, api_key: str, json_mode: bool = False) -> str:
     clean_key = api_key.strip()
-    model_name = get_available_model(clean_key)
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={clean_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{ACTIVE_MODEL}:generateContent?key={clean_key}"
     headers = {"Content-Type": "application/json"}
 
     payload = {
@@ -214,13 +175,13 @@ def call_gemini_api(prompt: str, system_prompt: str, api_key: str, json_mode: bo
                 return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
             elif resp.status_code in [503, 429]:
                 time.sleep(3 * (attempt + 1))
-                last_error = f"{model_name} (HTTP {resp.status_code}): {resp.text}"
+                last_error = f"{ACTIVE_MODEL} (HTTP {resp.status_code}): {resp.text}"
                 continue
             else:
-                last_error = f"{model_name} (HTTP {resp.status_code}): {resp.text}"
+                last_error = f"{ACTIVE_MODEL} (HTTP {resp.status_code}): {resp.text}"
                 break
         except Exception as e:
-            last_error = f"{model_name} (Exception): {str(e)}"
+            last_error = f"{ACTIVE_MODEL} (Exception): {str(e)}"
             time.sleep(2)
 
     raise RuntimeError(f"Gemini API Error after retries: {last_error}")
@@ -236,19 +197,19 @@ def run_extraction_pipeline(files_dict: Dict[str, str], api_key: str) -> List[Di
 
         parsed_records = []
         for it in stitched_items:
-            speaker, ev_type, quote_cand, is_interviewee_quote = classify_bullet_linguistics(
+            speaker, ev_type, quote_cand, context_desc, is_interviewee_quote = classify_bullet_linguistics(
                 it["text"], it["section"], primary_speaker
             )
             parsed_records.append({
                 "section": it["section"],
                 "full_text": it["text"],
                 "quote_candidate": quote_cand,
+                "context_desc": context_desc,
                 "speaker": speaker,
                 "evidence_type": ev_type,
                 "is_interviewee_quote": is_interviewee_quote
             })
 
-        # Thematic classification
         classification_payload = [
             {"index": idx, "section": r["section"], "text": r["quote_candidate"]}
             for idx, r in enumerate(parsed_records)
@@ -296,10 +257,10 @@ Return JSON array: [{{"index": 0, "theme": "..."}}]"""
                 "speaker": rec["speaker"],
                 "theme": theme,
                 "quote": quote,
+                "context": rec["context_desc"],
                 "full_text": rec["full_text"],
                 "evidence_type": rec["evidence_type"],
                 "is_interviewee_quote": rec["is_interviewee_quote"],
-                "context": f"Section: {rec['section']}",
                 "verified": audit["verified"],
                 "match_type": audit["match_type"],
                 "similarity_score": audit["similarity_score"],
@@ -311,9 +272,9 @@ Return JSON array: [{{"index": 0, "theme": "..."}}]"""
 
 
 def ask_evidence_query(query: str, evidence_list: List[Dict[str, Any]], api_key: str) -> Dict[str, Any]:
-    # Ground answers strictly on verified quotes and authenticated stakeholder feedback
+    # Provide both the quote and its contextual background to the LLM
     context_str = "\n".join([
-        f"[{e['id']}] ({e['file']} - {e['speaker']}) Theme: {e['theme']} | \"{e['quote']}\""
+        f"[{e['id']}] ({e['file']} - {e['speaker']}) Theme: {e['theme']} | Quote: \"{e['quote']}\" | Context: {e['context']}"
         for e in evidence_list if e.get("verified", False)
     ])
 
