@@ -1,7 +1,11 @@
 """
 app.py
 Streamlit web application for the GNP Evidence Pipeline.
-Displays quote context in Tab 1 and runs grounded Q&A on gemini-3.6-flash.
+Features:
+1. Evidence Matrix (with Context preservation)
+2. Deterministic Verification Report
+3. Grounded Q&A (gemini-3.6-flash)
+4. Linguistic Methodology & Filter Logic
 """
 
 import streamlit as st
@@ -15,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("⚖️ GNP Foundation — Qualitative Evidence & Verification Engine")
-st.caption("Subheading-aware quote extraction, contextual grounding, and deterministic verification.")
+st.caption("Subheading-aware quote extraction, authentic speaker attribution, and deterministic verification.")
 
 api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
 
@@ -48,7 +52,13 @@ if st.sidebar.button("Run Evidence Pipeline", type="primary"):
             except Exception as ex:
                 st.error(f"Pipeline Error: {str(ex)}")
 
-tab1, tab2, tab3 = st.tabs(["📊 Evidence Matrix", "🔍 Verification Report", "💬 Grounded Q&A"])
+# Four Main Tabs
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Evidence Matrix",
+    "🔍 Verification Report",
+    "💬 Grounded Q&A",
+    "📖 Linguistic Methodology & Filter Logic"
+])
 
 # Tab 1: Evidence Matrix with Context Column
 with tab1:
@@ -88,7 +98,6 @@ with tab1:
         if verified_filter:
             filtered = filtered[filtered["verified"] == True]
 
-        # Context column displayed right alongside the quote
         st.dataframe(
             filtered[["id", "theme", "speaker", "quote", "context", "file", "verified", "match_type"]],
             use_container_width=True,
@@ -159,3 +168,120 @@ with tab3:
                             )
                 except Exception as ex:
                     st.error(f"Query Error: {str(ex)}")
+
+# Tab 4: Linguistic Methodology & Filter Logic
+with tab4:
+    st.header("📖 Quote Qualification Methodology & Linguistic Rules")
+    st.markdown(
+        """
+        Consulting interview notes are inherently heterogeneous: they blend **verbatim quotes**, 
+        **relayed third-party feedback**, and **telegraphic notetaker summaries**. 
+        
+        To prevent subjective LLM extraction variances, this application executes a **deterministic, 
+        rules-based linguistic filter** before any semantic processing occurs.
+        """
+    )
+    
+    st.divider()
+
+    st.subheader("The 6-Stage Linguistic Qualification Framework")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("#### 1. Subheading Semantic Scoping (Attribution Guard)")
+        st.info(
+            """
+            **The Challenge:** Sections titled `REQUESTS FROM GRANTEES` or `GRANTEE MESSAGES` relay external complaints. 
+            Treating first-person words here as executive quotes causes false attribution.
+            
+            **The Rule:** Subheadings containing `GRANTEE`, `SURVEY`, or `EXTERNAL` are tagged as **Grantee Voice**. 
+            They are isolated from executive verbatims so they are never misattributed to the interviewee.
+            """
+        )
+
+        st.markdown("#### 2. Multi-Bullet Thought Overflow Stitching")
+        st.info(
+            """
+            **The Challenge:** Notetakers frequently break a single spoken sentence across multiple lines with a bullet.
+            
+            **The Rule:** If bullet $N+1$ begins with an adversative/causal connector (`but`, `because`, `so`, `and`, `e.g.`) 
+            or a lowercase character, it is syntactically stitched to bullet $N$ as a single coherent utterance.
+            """
+        )
+
+        st.markdown("#### 3. Shorthand Meta-Label & Prefix Stripping")
+        st.info(
+            """
+            **The Challenge:** Bullets often begin with notetaker labels followed by a dash or colon 
+            (e.g., *'PAIN POINTS — We just don't deliver well'*).
+            
+            **The Rule:** The prefix regex strips structural tags (`PAIN POINTS —`) to isolate the actual spoken words, 
+            while retaining the original label in the **Context** column.
+            """
+        )
+
+    with c2:
+        st.markdown("#### 4. The Finite Verb Test (Excluding Shorthand)")
+        st.success(
+            """
+            **The Challenge:** Notetakers write shorthand lists (e.g., *'Training costs'*, *'Facilities'*, *'Smart people'*). 
+            These are observational notes, not spoken quotes.
+            
+            **The Rule:** An item must contain at least one conjugated **finite verb** (*is, are, have, want, struggle, deliver*). 
+            Pure noun phrases are automatically routed to *Notetaker Notes*.
+            """
+        )
+
+        st.markdown("#### 5. Deictic & Conversational Voice Grounding")
+        st.success(
+            """
+            **The Challenge:** Distinguishing between third-person summary bullets and active spoken voice.
+            
+            **The Rule:** Candidate quotes must contain first-person pronouns (`I`, `we`, `our`, `us`, `I'm`, `we're`) 
+            or take the form of executive rhetorical questions (*'How do we show up to our grantees...'*).
+            """
+        )
+
+        st.markdown("#### 6. Disambiguation of Quotation Marks")
+        st.success(
+            """
+            **The Challenge:** Quotation marks in notes are often used to name initiatives or buzzwords 
+            (e.g., *'moving away from "command and control"'* or *'"My President\'s Discretionary Fund"'*).
+            
+            **The Rule:** Quoted substrings are only isolated as direct quotes if they constitute a complete grammatical clause 
+            ($\ge 4$ words with a verb). Isolated nouns in quotes remain embedded within their full bullet context.
+            """
+        )
+
+    st.divider()
+
+    st.subheader("Comparison Table: How Content is Classified")
+    
+    classification_examples = [
+        {
+            "Raw Bullet from Notes": "- We just don't deliver well. The hierarchy causes leadership to struggle with how to get approvals",
+            "Classification": "Interviewee Quote (Spoken Verbatim)",
+            "Reasoning": "Active first-person voice ('We'), contains finite verbs ('deliver', 'struggle'), expresses speaker's direct experience."
+        },
+        {
+            "Raw Bullet from Notes": "- \"Our current structure relies too much on 'one person at the top having the answer'\"",
+            "Classification": "Interviewee Quote (Direct Quote)",
+            "Reasoning": "Full grammatical clause enclosed in double quotes; contains finite verb ('relies')."
+        },
+        {
+            "Raw Bullet from Notes": "- \"How does the Foundation show up in these communities?\" (under 'REQUESTS FROM GRANTEES')",
+            "Classification": "Grantee Voice (Relayed Feedback)",
+            "Reasoning": "Subheading identifies external stakeholder context; attributed to Grantee Feedback, not the Head of Learning."
+        },
+        {
+            "Raw Bullet from Notes": "- Training costs / Facilities / Smart people",
+            "Classification": "Notetaker Note (Paraphrase)",
+            "Reasoning": "Lacks finite verbs and subject-predicate structure; identified as notetaker shorthand indexing."
+        },
+        {
+            "Raw Bullet from Notes": "- We are committed to the success of CEO... / - BUT until we know what shifting roles looks like...",
+            "Classification": "Stitched Interviewee Quote",
+            "Reasoning": "Second bullet starts with 'BUT', indicating an adversative continuation; stitched into a unified statement."
+        }
+    ]
+    st.table(pd.DataFrame(classification_examples))
