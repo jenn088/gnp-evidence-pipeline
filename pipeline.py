@@ -1,7 +1,7 @@
 """
 pipeline.py
 Subheading-aware extraction, quote context preservation,
-and direct gemini-3.6-flash API communication.
+strategic organizational theme categorization, and Gemini API verification.
 """
 
 import re
@@ -12,8 +12,17 @@ import requests
 from verifier import verify_quote
 from prompts import CLASSIFICATION_SYSTEM_PROMPT, QA_SYSTEM_PROMPT
 
-# Enforce active supported model
 ACTIVE_MODEL = "gemini-3.6-flash"
+
+# Define canonical organizational strategic themes
+STRATEGIC_THEMES = [
+    "Decision-Making & Bureaucracy",
+    "Cross-Functional Silos & Alignment",
+    "Grantee Experience & Responsiveness",
+    "Workforce Capability & Change Readiness",
+    "Leadership & Governance"
+]
+DEFAULT_THEME = "General Organizational Strategy"
 
 PROXY_SECTION_PATTERNS = re.compile(
     r'(GRANTEE|SURVEY|COMMUNITY REQUESTS|EXTERNAL|FEEDBACK|FUTURE DEMANDS)',
@@ -98,28 +107,18 @@ def parse_document_structure(raw_text: str) -> List[Dict[str, Any]]:
 
 
 def classify_bullet_linguistics(item_text: str, section: str, primary_speaker: str) -> Tuple[str, str, str, str, bool]:
-    """
-    Returns: (attributed_speaker, evidence_type, candidate_quote, descriptive_context, is_interviewee_quote)
-    """
     text = item_text.strip()
     is_proxy_section = bool(PROXY_SECTION_PATTERNS.search(section))
 
-    if is_proxy_section:
-        attributed_speaker = f"Grantee Feedback (via {primary_speaker})"
-    else:
-        attributed_speaker = primary_speaker
+    attributed_speaker = f"Grantee Feedback (via {primary_speaker})" if is_proxy_section else primary_speaker
 
-    # Check 1: Explicit quotation marks
     explicit_matches = re.findall(r'"([^"]+)"', text)
     for q in explicit_matches:
         if len(q.split()) >= 4 and FINITE_VERB_PATTERN.search(q):
-            # The context is the original surrounding text and section
             context_desc = f"[{section}] {text}"
-            if is_proxy_section:
-                return attributed_speaker, "Grantee Voice", q, context_desc, False
-            return attributed_speaker, "Direct Quote", q, context_desc, True
+            ev_type = "Grantee Voice" if is_proxy_section else "Direct Quote"
+            return attributed_speaker, ev_type, q, context_desc, not is_proxy_section
 
-    # Check 2: Shorthand prefix stripping
     candidate = text
     prefix_match = NOTE_PREFIX_PATTERN.match(text)
     if prefix_match:
@@ -128,23 +127,19 @@ def classify_bullet_linguistics(item_text: str, section: str, primary_speaker: s
         if len(remainder.split()) >= 4:
             candidate = remainder
 
-    # Context retains the full untouched bullet plus section
     context_desc = f"[{section}] {text}"
 
-    # Check 3: Spoken Voice Evaluation
     has_first_person = bool(FIRST_PERSON_PATTERN.search(candidate))
     has_finite_verb = bool(FINITE_VERB_PATTERN.search(candidate))
     word_count = len(candidate.split())
-
     is_rhetorical = candidate.endswith("?") and any(
         candidate.lower().startswith(w) for w in ["how do we", "how does", "what are", "why"]
     )
 
     if (has_first_person and has_finite_verb and word_count >= 4) or (is_rhetorical and word_count >= 3):
         if not candidate.lower().startswith("mantra of"):
-            if is_proxy_section:
-                return attributed_speaker, "Grantee Voice", candidate, context_desc, False
-            return attributed_speaker, "Spoken Verbatim", candidate, context_desc, True
+            ev_type = "Grantee Voice" if is_proxy_section else "Spoken Verbatim"
+            return attributed_speaker, ev_type, candidate, context_desc, not is_proxy_section
 
     if is_proxy_section:
         return attributed_speaker, "Grantee Summary", text, context_desc, False
@@ -187,9 +182,26 @@ def call_gemini_api(prompt: str, system_prompt: str, api_key: str, json_mode: bo
     raise RuntimeError(f"Gemini API Error after retries: {last_error}")
 
 
+def match_canonical_theme(assigned: str) -> str:
+    """Normalize model output to ensure exact match with the strategic taxonomy."""
+    if not assigned:
+        return DEFAULT_THEME
+    cleaned = assigned.strip().lower()
+    for valid in STRATEGIC_THEMES:
+        if cleaned == valid.lower():
+            return valid
+        # Match primary keywords if slight phrasing variation occurs
+        first_token = valid.split()[0].lower()
+        if first_token in cleaned:
+            return valid
+    return DEFAULT_THEME
+
+
 def run_extraction_pipeline(files_dict: Dict[str, str], api_key: str) -> List[Dict[str, Any]]:
     all_evidence = []
     evidence_id = 1
+
+    theme_options = "\n".join([f"- {t}" for t in STRATEGIC_THEMES])
 
     for filename, raw_text in sorted(files_dict.items()):
         primary_speaker = extract_primary_speaker(filename, raw_text)
@@ -210,25 +222,32 @@ def run_extraction_pipeline(files_dict: Dict[str, str], api_key: str) -> List[Di
                 "is_interviewee_quote": is_interviewee_quote
             })
 
+        if not parsed_records:
+            continue
+
+        # Payload supplies the text and context, but explicitly instructs classification to target the taxonomy
         classification_payload = [
-            {"index": idx, "section": r["section"], "text": r["quote_candidate"]}
+            {"index": idx, "statement": r["quote_candidate"], "context": r["context_desc"]}
             for idx, r in enumerate(parsed_records)
         ]
 
         prompt = f"""SPEAKER: {primary_speaker}
-DOCUMENT: {filename}
+SOURCE FILE: {filename}
+
+TASK:
+Categorize each excerpt into exactly ONE of the authorized Strategic Organizational Themes below.
+Do NOT output document section names, file headers, or subheadings.
+
+AUTHORIZED STRATEGIC THEMES:
+{theme_options}
+
 EVIDENCE ITEMS:
 {json.dumps(classification_payload, indent=2)}
 
-Assign each item to exactly one theme:
-- Decision-Making & Bureaucracy
-- Cross-Functional Silos & Alignment
-- Grantee Experience & Responsiveness
-- Workforce Capability & Change Readiness
-- Leadership & Governance
+Return a strict JSON array of objects:
+[{{"index": 0, "theme": "Exact Strategic Theme Name"}}]"""
 
-Return JSON array: [{{"index": 0, "theme": "..."}}]"""
-
+        theme_map = {}
         try:
             raw_resp = call_gemini_api(
                 prompt=prompt,
@@ -237,17 +256,21 @@ Return JSON array: [{{"index": 0, "theme": "..."}}]"""
                 json_mode=True
             ).strip()
 
-            if raw_resp.startswith("```json"):
-                raw_resp = raw_resp[7:]
-            if raw_resp.endswith("```"):
-                raw_resp = raw_resp[:-3]
-
-            theme_map = {item["index"]: item.get("theme", "General") for item in json.loads(raw_resp.strip())}
+            # Locate JSON array block safely
+            json_match = re.search(r'\[.*\]', raw_resp, re.DOTALL)
+            if json_match:
+                parsed_json = json.loads(json_match.group(0))
+                for item in parsed_json:
+                    idx = item.get("index")
+                    raw_theme = item.get("theme", "")
+                    if idx is not None:
+                        theme_map[int(idx)] = match_canonical_theme(raw_theme)
         except Exception:
             theme_map = {}
 
         for idx, rec in enumerate(parsed_records):
-            theme = theme_map.get(idx, rec["section"].title())
+            # Enforce strategic theme; never use rec["section"]
+            theme = theme_map.get(idx, DEFAULT_THEME)
             quote = rec["quote_candidate"]
             audit = verify_quote(quote=quote, raw_source=raw_text)
 
@@ -255,6 +278,7 @@ Return JSON array: [{{"index": 0, "theme": "..."}}]"""
                 "id": f"EVD-{evidence_id:03d}",
                 "file": filename,
                 "speaker": rec["speaker"],
+                "subheading": rec["section"],  # Preserved as structural metadata without polluting theme
                 "theme": theme,
                 "quote": quote,
                 "context": rec["context_desc"],
@@ -272,9 +296,8 @@ Return JSON array: [{{"index": 0, "theme": "..."}}]"""
 
 
 def ask_evidence_query(query: str, evidence_list: List[Dict[str, Any]], api_key: str) -> Dict[str, Any]:
-    # Provide both the quote and its contextual background to the LLM
     context_str = "\n".join([
-        f"[{e['id']}] ({e['file']} - {e['speaker']}) Theme: {e['theme']} | Quote: \"{e['quote']}\" | Context: {e['context']}"
+        f"[{e['id']}] ({e['file']} - {e['speaker']}) Strategic Theme: {e['theme']} | Section: {e.get('subheading', 'N/A')} | Quote: \"{e['quote']}\" | Context: {e['context']}"
         for e in evidence_list if e.get("verified", False)
     ])
 
