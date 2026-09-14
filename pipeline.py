@@ -1,7 +1,7 @@
 """
 pipeline.py
-Linguistic-aware pipeline that separates true spoken quotes from notetaker summaries,
-runs structured classification, and performs deterministic verification.
+Linguistic-aware pipeline with Dynamic Model Discovery (no hardcoded model guesses).
+Automatically queries Google's live catalog to pick the best working model for your key.
 """
 
 import re
@@ -12,22 +12,54 @@ import requests
 from verifier import verify_quote
 from prompts import CLASSIFICATION_SYSTEM_PROMPT, QA_SYSTEM_PROMPT
 
-ACTIVE_MODELS = [
-    "gemini-3.6-flash",
-    "gemini-3.6-pro"
-]
+# Cache the working model name so we don't query the catalog repeatedly
+WORKING_MODEL = None
 
-# Patterns indicating natural first-person conversational voice
 FIRST_PERSON_PATTERN = re.compile(
     r'\b(I|we|my|our|us|I\'m|we\'re|I\'ve|we\'ve|I\'d|we\'d|don\'t|can\'t|won\'t)\b',
     re.IGNORECASE
 )
 
-# Common notetaker shorthand prefixes that signify paraphrasing
 NOTE_PREFIX_PATTERN = re.compile(
     r'^(mantra of|shift in|barrier|success|challenge of|example:|report directly|willingness to|old paradigm:|e\.g\.)',
     re.IGNORECASE
 )
+
+
+def get_available_model(api_key: str) -> str:
+    """Queries Google's ModelService.ListModels to find an active model that supports generateContent."""
+    global WORKING_MODEL
+    if WORKING_MODEL:
+        return WORKING_MODEL
+
+    clean_key = api_key.strip()
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={clean_key}"
+    
+    try:
+        resp = requests.get(url, timeout=30)
+        if resp.status_code == 200:
+            models_data = resp.json().get("models", [])
+            # Find models that support generateContent
+            compatible_models = [
+                m["name"].replace("models/", "")
+                for m in models_data
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+            ]
+            
+            # Prefer flash models first for speed, then any other compatible model
+            flash_candidates = [m for m in compatible_models if "flash" in m]
+            if flash_candidates:
+                WORKING_MODEL = flash_candidates[0]
+                return WORKING_MODEL
+            elif compatible_models:
+                WORKING_MODEL = compatible_models[0]
+                return WORKING_MODEL
+    except Exception as e:
+        print(f"Model discovery fallback: {e}")
+
+    # Fallback to the latest standard flash model
+    WORKING_MODEL = "gemini-3.6-flash"
+    return WORKING_MODEL
 
 
 def extract_speaker_from_header(text: str) -> str:
@@ -40,24 +72,13 @@ def extract_speaker_from_header(text: str) -> str:
 
 
 def classify_bullet_linguistics(bullet: str) -> Tuple[str, str]:
-    """
-    Classifies a raw bullet into:
-    1. Direct Quote (explicitly in quotation marks)
-    2. Spoken Verbatim (natural spoken first-person voice)
-    3. Paraphrase / Summary (notetaker fragment or third-person summary)
-    """
     stripped = bullet.strip()
-    
-    # 1. Check for explicit quotation marks
     quote_matches = re.findall(r'"([^"]+)"', stripped)
     if quote_matches:
-        # Extract the primary quote inside the quotes
         longest_quote = max(quote_matches, key=len)
         if len(longest_quote.split()) >= 3:
             return "Direct Quote", longest_quote
 
-    # 2. Check for natural first-person spoken sentence structure
-    # Must have first-person tokens and sufficient sentence length (>= 5 words)
     words = stripped.split()
     has_first_person = bool(FIRST_PERSON_PATTERN.search(stripped))
     is_notetaker_prefix = bool(NOTE_PREFIX_PATTERN.search(stripped))
@@ -65,7 +86,6 @@ def classify_bullet_linguistics(bullet: str) -> Tuple[str, str]:
     if has_first_person and len(words) >= 5 and not is_notetaker_prefix:
         return "Spoken Verbatim", stripped
 
-    # 3. Everything else is a notetaker paraphrase/summary
     return "Notetaker Paraphrase", stripped
 
 
@@ -79,13 +99,11 @@ def parse_interview_bullets(raw_text: str) -> List[Dict[str, Any]]:
         if not stripped:
             continue
 
-        # Detect section headings
         if not stripped.startswith("-") and not stripped.startswith("[source:") and not stripped.startswith("GNP FOUNDATION"):
             if stripped.isupper() or "—" in stripped or "-" in stripped:
                 current_section = stripped.replace("—", "-").strip()
                 continue
 
-        # Parse bullet lines
         if stripped.startswith("-"):
             bullet_body = stripped.lstrip("-").strip()
             if not bullet_body:
@@ -106,6 +124,9 @@ def parse_interview_bullets(raw_text: str) -> List[Dict[str, Any]]:
 
 def call_gemini_api(prompt: str, system_prompt: str, api_key: str, json_mode: bool = False) -> str:
     clean_key = api_key.strip()
+    model_name = get_available_model(clean_key)
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={clean_key}"
     headers = {"Content-Type": "application/json"}
 
     payload = {
@@ -117,28 +138,28 @@ def call_gemini_api(prompt: str, system_prompt: str, api_key: str, json_mode: bo
     if json_mode:
         payload["generationConfig"]["response_mime_type"] = "application/json"
 
-    max_retries = 3
+    max_retries = 4
     last_error = ""
 
-    for model in ACTIVE_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={clean_key}"
-        for attempt in range(max_retries):
-            try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=60)
-                if resp.status_code == 200:
-                    return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-                elif resp.status_code in [503, 429]:
-                    time.sleep(2 * (attempt + 1))
-                    last_error = f"{model} (HTTP {resp.status_code}): {resp.text}"
-                    continue
-                else:
-                    last_error = f"{model} (HTTP {resp.status_code}): {resp.text}"
-                    break
-            except Exception as e:
-                last_error = f"{model} (Exception): {str(e)}"
-                time.sleep(1)
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=60)
+            if resp.status_code == 200:
+                return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            
+            # If rate-limited or temporary high demand, back off and retry
+            elif resp.status_code in [503, 429]:
+                time.sleep(3 * (attempt + 1))
+                last_error = f"{model_name} (HTTP {resp.status_code}): {resp.text}"
+                continue
+            else:
+                last_error = f"{model_name} (HTTP {resp.status_code}): {resp.text}"
+                break
+        except Exception as e:
+            last_error = f"{model_name} (Exception): {str(e)}"
+            time.sleep(2)
 
-    raise RuntimeError(f"Gemini API Error: {last_error}")
+    raise RuntimeError(f"Gemini API Error after retries: {last_error}")
 
 
 def run_extraction_pipeline(files_dict: Dict[str, str], api_key: str) -> List[Dict[str, Any]]:
@@ -149,7 +170,6 @@ def run_extraction_pipeline(files_dict: Dict[str, str], api_key: str) -> List[Di
         speaker = extract_speaker_from_header(raw_text)
         parsed_bullets = parse_interview_bullets(raw_text)
 
-        # Batch classify with Gemini
         bullets_payload = [
             {"index": idx, "section": b["section"], "text": b["quote_candidate"]}
             for idx, b in enumerate(parsed_bullets)
@@ -160,14 +180,14 @@ DOCUMENT: {filename}
 BULLETS:
 {json.dumps(bullets_payload, indent=2)}
 
-Assign each indexed bullet to exactly one of the 5 themes:
+Assign each indexed bullet to exactly one of the 5 strategic themes:
 - Decision-Making & Bureaucracy
 - Cross-Functional Silos & Alignment
 - Grantee Experience & Responsiveness
 - Workforce Capability & Change Readiness
 - Leadership & Governance
 
-Return JSON array: [{{"index": 0, "theme": "..."}}]"""
+Return JSON array of objects: [{{"index": 0, "theme": "..."}}]"""
 
         try:
             raw_resp = call_gemini_api(
@@ -212,7 +232,6 @@ Return JSON array: [{{"index": 0, "theme": "..."}}]"""
 
 
 def ask_evidence_query(query: str, evidence_list: List[Dict[str, Any]], api_key: str) -> Dict[str, Any]:
-    # Ground only on verified true quotes (Direct Quotes and Spoken Verbatims)
     context_str = "\n".join([
         f"[{e['id']}] ({e['file']} - {e['speaker']}) Theme: {e['theme']} | \"{e['quote']}\""
         for e in evidence_list if e.get("verified", False) and e.get("is_quote", False)
