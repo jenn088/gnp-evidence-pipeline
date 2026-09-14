@@ -2,7 +2,7 @@
 app.py
 Streamlit web application for the GNP Evidence Pipeline.
 Features:
-1. Dynamic Thematic Discovery & Evidence Matrix
+1. Dynamic Evidence Matrix (streamlined layout without top theme boxes)
 2. Deterministic Verification Audit
 3. Grounded Q&A (gemini-3.6-flash)
 4. Linguistic Methodology & Filter Logic
@@ -64,20 +64,11 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "📖 Linguistic Methodology & Filter Logic"
 ])
 
-# Tab 1: Dynamic Evidence Matrix
+# Tab 1: Dynamic Evidence Matrix (Clean, Direct Table View)
 with tab1:
     if not st.session_state.evidence_data:
         st.info("Upload interview files in the sidebar and click **Run Evidence Pipeline**.")
     else:
-        # Showcase the dynamically discovered transformation themes
-        if st.session_state.discovered_themes:
-            st.markdown("### 🎯 Inductively Discovered Transformation Themes")
-            t_cols = st.columns(len(st.session_state.discovered_themes))
-            for i, theme_obj in enumerate(st.session_state.discovered_themes):
-                with t_cols[i]:
-                    st.info(f"**{theme_obj['theme_title']}**\n\n{theme_obj.get('description', '')}")
-            st.divider()
-
         df = pd.DataFrame(st.session_state.evidence_data)
 
         col1, col2, col3, col4 = st.columns(4)
@@ -114,7 +105,7 @@ with tab1:
         st.dataframe(
             filtered[["id", "theme", "speaker", "quote", "context", "file", "verified", "match_type"]],
             use_container_width=True,
-            height=460,
+            height=520,
             column_config={
                 "theme": st.column_config.TextColumn("Dynamic Theme", width="medium"),
                 "quote": st.column_config.TextColumn("Verbatim Quote", width="medium"),
