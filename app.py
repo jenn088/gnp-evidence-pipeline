@@ -1,7 +1,7 @@
 """
 app.py
 Streamlit web application for the GNP Evidence Pipeline.
-Features quote vs. paraphrase separation, persistent keys, and grounded Q&A.
+Uses preconfigured backend secrets for seamless client-ready evaluation.
 """
 
 import streamlit as st
@@ -17,26 +17,11 @@ st.set_page_config(
 st.title("⚖️ GNP Foundation — Qualitative Evidence & Verification Engine")
 st.caption("Deterministic quote extraction, linguistic authenticity classification, and quote verification.")
 
-# Sidebar Configuration
-st.sidebar.header("Configuration")
+# Retrieve API key securely from Streamlit Secrets
+api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
 
-default_key = ""
-if "GEMINI_API_KEY" in st.secrets:
-    default_key = st.secrets["GEMINI_API_KEY"]
-
-if "saved_gemini_key" not in st.session_state:
-    st.session_state.saved_gemini_key = default_key
-
-api_key = st.sidebar.text_input(
-    "Gemini API Key",
-    value=st.session_state.saved_gemini_key,
-    type="password",
-    help="Key is preserved across sessions. Set once or save in Streamlit Secrets."
-)
-
-if api_key != st.session_state.saved_gemini_key:
-    st.session_state.saved_gemini_key = api_key
-
+# Sidebar: File Upload Only
+st.sidebar.header("Evidence Ingestion")
 uploaded_files = st.sidebar.file_uploader(
     "Upload Interview Files (.txt)",
     type=["txt"],
@@ -47,18 +32,20 @@ if "evidence_data" not in st.session_state:
     st.session_state.evidence_data = []
 
 if st.sidebar.button("Run Evidence Pipeline", type="primary"):
-    effective_key = api_key.strip() or st.session_state.saved_gemini_key.strip()
-    if not effective_key:
-        st.sidebar.error("Please enter your Gemini API Key.")
+    if not api_key:
+        st.sidebar.error("System configuration error: GEMINI_API_KEY is missing from app secrets.")
     elif not uploaded_files:
         st.sidebar.error("Please upload at least one .txt interview file.")
     else:
-        with st.spinner("Classifying spoken quotes vs. paraphrases and running audits..."):
+        with st.spinner("Classifying spoken quotes vs. paraphrases and running verification audits..."):
             try:
                 files_dict = {f.name: f.read().decode("utf-8") for f in uploaded_files}
-                st.session_state.evidence_data = run_extraction_pipeline(files_dict, effective_key)
+                st.session_state.evidence_data = run_extraction_pipeline(files_dict, api_key)
                 quotes_count = sum(1 for e in st.session_state.evidence_data if e["is_quote"])
-                st.sidebar.success(f"Extracted {len(st.session_state.evidence_data)} total items ({quotes_count} verified quotes, {len(st.session_state.evidence_data) - quotes_count} notetaker paraphrases)!")
+                st.sidebar.success(
+                    f"Extracted {len(st.session_state.evidence_data)} total items "
+                    f"({quotes_count} verified quotes, {len(st.session_state.evidence_data) - quotes_count} notetaker paraphrases)!"
+                )
             except Exception as ex:
                 st.error(f"Pipeline Error: {str(ex)}")
 
@@ -80,7 +67,12 @@ with tab1:
         with col3:
             evidence_view = st.selectbox(
                 "Filter Evidence Type",
-                ["True Quotes Only (Spoken/Direct)", "Direct Quotes Only (\"...\")", "Spoken Verbatims Only (1st person)", "All Items (Incl. Paraphrases)"]
+                [
+                    "True Quotes Only (Spoken/Direct)",
+                    "Direct Quotes Only (\"...\")",
+                    "Spoken Verbatims Only (1st person)",
+                    "All Items (Incl. Paraphrases)"
+                ]
             )
         with col4:
             verified_filter = st.checkbox("Verified Word-for-Word Only", value=True)
@@ -90,8 +82,7 @@ with tab1:
             filtered = filtered[filtered["theme"] == theme_choice]
         if speaker_choice != "All":
             filtered = filtered[filtered["speaker"] == speaker_choice]
-        
-        # View filter logic
+
         if evidence_view == "True Quotes Only (Spoken/Direct)":
             filtered = filtered[filtered["is_quote"] == True]
         elif evidence_view == "Direct Quotes Only (\"...\")":
@@ -145,9 +136,8 @@ with tab3:
     )
 
     if st.button("Submit Question"):
-        effective_key = api_key.strip() or st.session_state.saved_gemini_key.strip()
-        if not effective_key:
-            st.error("Gemini API key is required.")
+        if not api_key:
+            st.error("System configuration error: GEMINI_API_KEY is missing from app secrets.")
         elif not st.session_state.evidence_data:
             st.error("Please run the pipeline on your interview files first.")
         elif not query:
@@ -155,13 +145,15 @@ with tab3:
         else:
             with st.spinner("Synthesizing answer grounded exclusively in verified spoken quotes..."):
                 try:
-                    res = ask_evidence_query(query, st.session_state.evidence_data, effective_key)
+                    res = ask_evidence_query(query, st.session_state.evidence_data, api_key)
                     st.markdown("### Synthesized Finding")
                     st.write(res["answer"])
 
                     if res["cited_evidence"]:
                         st.markdown("#### Direct Verified Citations")
                         for ev in res["cited_evidence"]:
-                            st.success(f"**\"{ev['quote']}\"**\n\n— *{ev['speaker']} ({ev['file']})* [Type: {ev['evidence_type']}]")
+                            st.success(
+                                f"**\"{ev['quote']}\"**\n\n— *{ev['speaker']} ({ev['file']})* [Type: {ev['evidence_type']}]"
+                            )
                 except Exception as ex:
                     st.error(f"Query Error: {str(ex)}")
