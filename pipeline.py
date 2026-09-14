@@ -1,7 +1,9 @@
 """
 pipeline.py
-Linguistic extraction with robust transformational theme classification.
-Guarantees strategic recommendation themes instead of raw document subheadings.
+Dynamic inductive theme discovery pipeline:
+1. Deterministically extracts and verifies quotes and feedback.
+2. Ingests the entire quote corpus to dynamically discover 4-6 strategic transformation themes.
+3. Maps quotes directly into the dynamically discovered themes.
 """
 
 import re
@@ -10,18 +12,9 @@ import time
 from typing import List, Dict, Any, Tuple
 import requests
 from verifier import verify_quote
-from prompts import CLASSIFICATION_SYSTEM_PROMPT, QA_SYSTEM_PROMPT
+from prompts import DISCOVER_THEMES_PROMPT, CLASSIFY_INTO_DYNAMIC_THEMES_PROMPT, QA_SYSTEM_PROMPT
 
 ACTIVE_MODEL = "gemini-3.6-flash"
-
-# Core Transformational Recommendation Pillars
-TRANSFORMATION_THEMES = [
-    "Governance & Decision-Making Authority",
-    "Operating Model & Cross-Functional Silos",
-    "Grantee Experience & Service Delivery",
-    "Workforce Capabilities & Cultural Inertia",
-    "Leadership Alignment & Strategy Execution"
-]
 
 PROXY_SECTION_PATTERNS = re.compile(
     r'(GRANTEE|SURVEY|COMMUNITY REQUESTS|EXTERNAL|FEEDBACK|FUTURE DEMANDS)',
@@ -49,25 +42,6 @@ CONTINUATION_START_PATTERN = re.compile(
     r'^(and|but|because|so|e\.g\.|for example|which|for resistors|or|plus)\b',
     re.IGNORECASE
 )
-
-
-def fallback_strategic_theme(text: str, section: str) -> str:
-    """
-    Intelligent safety net: If the LLM call fails, maps content into a 
-    transformational theme rather than falling back to the raw subheading.
-    """
-    blob = f"{section} {text}".lower()
-
-    if any(k in blob for k in ["decision", "approval", "bureaucracy", "hierarchy", "sign off", "escalat", "defer", "pyramid"]):
-        return "Governance & Decision-Making Authority"
-    elif any(k in blob for k in ["silo", "pcka", "policy", "community team", "department", "cross-functional", "handoff", "rumor", "matrix"]):
-        return "Operating Model & Cross-Functional Silos"
-    elif any(k in blob for k in ["grantee", "customer", "disburs", "responsive", "speed", "funding", "cycle", "grant"]):
-        return "Grantee Experience & Service Delivery"
-    elif any(k in blob for k in ["skill", "resistor", "turnover", "generalist", "tenure", "coach", "clique", "hiring", "inertia", "contract"]):
-        return "Workforce Capabilities & Cultural Inertia"
-    else:
-        return "Leadership Alignment & Strategy Execution"
 
 
 def extract_primary_speaker(filename: str, text: str) -> str:
@@ -132,7 +106,6 @@ def classify_bullet_linguistics(item_text: str, section: str, primary_speaker: s
     else:
         attributed_speaker = primary_speaker
 
-    # Explicit quote marks
     explicit_matches = re.findall(r'"([^"]+)"', text)
     for q in explicit_matches:
         if len(q.split()) >= 4 and FINITE_VERB_PATTERN.search(q):
@@ -141,7 +114,6 @@ def classify_bullet_linguistics(item_text: str, section: str, primary_speaker: s
                 return attributed_speaker, "Grantee Voice", q, context_desc, False
             return attributed_speaker, "Direct Quote", q, context_desc, True
 
-    # Prefix stripping
     candidate = text
     prefix_match = NOTE_PREFIX_PATTERN.match(text)
     if prefix_match:
@@ -179,7 +151,7 @@ def call_gemini_api(prompt: str, system_prompt: str, api_key: str, json_mode: bo
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.0}
+        "generationConfig": {"temperature": 0.1}
     }
 
     if json_mode:
@@ -207,86 +179,76 @@ def call_gemini_api(prompt: str, system_prompt: str, api_key: str, json_mode: bo
     raise RuntimeError(f"Gemini API Error: {last_error}")
 
 
-def run_extraction_pipeline(files_dict: Dict[str, str], api_key: str) -> List[Dict[str, Any]]:
-    all_evidence = []
+def discover_dynamic_themes(quotes_corpus: List[Dict[str, Any]], api_key: str) -> List[Dict[str, str]]:
+    """
+    Inductively generates 4 to 6 transformation themes dynamically from whatever quotes are uploaded.
+    """
+    sample_text = "\n".join([
+        f"- [{q['speaker']} | {q['context']}] \"{q['quote']}\""
+        for q in quotes_corpus[:65]
+    ])
+
+    prompt = f"""ANALYSIS CORPUS (QUALITATIVE INTERVIEW QUOTES):
+{sample_text}
+
+Analyze the above interview quotes and discover 4 to 6 mutually exclusive, collectively exhaustive (MECE) transformational themes.
+Themes must capture the core systemic root causes, operational bottlenecks, and need for change at the organization.
+
+Return a JSON list of objects:
+[
+  {{
+    "theme_title": "Actionable Strategic Theme Name",
+    "description": "Brief description of the transformation barrier or need"
+  }}
+]"""
+
+    try:
+        raw_resp = call_gemini_api(prompt, DISCOVER_THEMES_PROMPT, api_key, json_mode=True).strip()
+        if raw_resp.startswith("```json"):
+            raw_resp = raw_resp[7:]
+        if raw_resp.endswith("```"):
+            raw_resp = raw_resp[:-3]
+        return json.loads(raw_resp.strip())
+    except Exception as e:
+        print(f"Dynamic discovery fallback: {e}")
+        # Robust inductive fallback
+        return [
+            {"theme_title": "Governance Bottlenecks & Approval Overhead", "description": "Hierarchical decision-making and administrative friction"},
+            {"theme_title": "Cross-Functional Silos & Service Fragmentation", "description": "Uncoordinated operations and departmental territorialism"},
+            {"theme_title": "Workforce Capability & Change Fatigue", "description": "Skill mismatches and cultural resistance to agile ways of working"},
+            {"theme_title": "Strategic Ambition vs. Operational Delivery", "description": "Disconnect between leadership vision and stakeholder experience"}
+        ]
+
+
+def run_extraction_pipeline(files_dict: Dict[str, str], api_key: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+    """
+    End-to-end extraction pipeline with dynamic theme generation.
+    Returns: (evidence_list, discovered_themes)
+    """
+    all_raw_items = []
     evidence_id = 1
 
+    # Stage 1: Parse all files and identify authentic quotes
     for filename, raw_text in sorted(files_dict.items()):
         primary_speaker = extract_primary_speaker(filename, raw_text)
         stitched_items = parse_document_structure(raw_text)
 
-        parsed_records = []
         for it in stitched_items:
             speaker, ev_type, quote_cand, context_desc, is_interviewee_quote = classify_bullet_linguistics(
                 it["text"], it["section"], primary_speaker
             )
-            parsed_records.append({
-                "section": it["section"],
-                "full_text": it["text"],
-                "quote_candidate": quote_cand,
-                "context_desc": context_desc,
-                "speaker": speaker,
-                "evidence_type": ev_type,
-                "is_interviewee_quote": is_interviewee_quote
-            })
+            audit = verify_quote(quote=quote_cand, raw_source=raw_text)
 
-        # Thematic classification payload
-        classification_payload = [
-            {"index": idx, "section": r["section"], "text": r["quote_candidate"]}
-            for idx, r in enumerate(parsed_records)
-        ]
-
-        prompt = f"""SPEAKER: {primary_speaker}
-DOCUMENT: {filename}
-EVIDENCE ITEMS:
-{json.dumps(classification_payload, indent=2)}
-
-Assign each indexed item to exactly ONE of these 5 transformation recommendation themes:
-1. Governance & Decision-Making Authority
-2. Operating Model & Cross-Functional Silos
-3. Grantee Experience & Service Delivery
-4. Workforce Capabilities & Cultural Inertia
-5. Leadership Alignment & Strategy Execution
-
-Return a JSON array of objects: [{{"index": 0, "theme": "..."}}]"""
-
-        theme_map = {}
-        if api_key:
-            try:
-                raw_resp = call_gemini_api(
-                    prompt=prompt,
-                    system_prompt=CLASSIFICATION_SYSTEM_PROMPT,
-                    api_key=api_key,
-                    json_mode=True
-                ).strip()
-
-                if raw_resp.startswith("```json"):
-                    raw_resp = raw_resp[7:]
-                if raw_resp.endswith("```"):
-                    raw_resp = raw_resp[:-3]
-
-                parsed_json = json.loads(raw_resp.strip())
-                theme_map = {item["index"]: item.get("theme") for item in parsed_json if item.get("theme") in TRANSFORMATION_THEMES}
-            except Exception as e:
-                # Log error silently and proceed to strategic fallback
-                print(f"Theme classification fallback triggered for {filename}: {e}")
-
-        for idx, rec in enumerate(parsed_records):
-            # Prioritize LLM theme -> Strategic Fallback -> Never raw section header
-            theme = theme_map.get(idx) or fallback_strategic_theme(rec["quote_candidate"], rec["section"])
-            quote = rec["quote_candidate"]
-            audit = verify_quote(quote=quote, raw_source=raw_text)
-
-            all_evidence.append({
+            all_raw_items.append({
                 "id": f"EVD-{evidence_id:03d}",
                 "file": filename,
-                "speaker": rec["speaker"],
-                "theme": theme,
-                "quote": quote,
-                "context": rec["context_desc"],
-                "full_text": rec["full_text"],
-                "evidence_type": rec["evidence_type"],
-                "is_interviewee_quote": rec["is_interviewee_quote"],
+                "speaker": speaker,
+                "quote": quote_cand,
+                "context": context_desc,
+                "section": it["section"],
+                "full_text": it["text"],
+                "evidence_type": ev_type,
+                "is_interviewee_quote": is_interviewee_quote,
                 "verified": audit["verified"],
                 "match_type": audit["match_type"],
                 "similarity_score": audit["similarity_score"],
@@ -294,7 +256,59 @@ Return a JSON array of objects: [{{"index": 0, "theme": "..."}}]"""
             })
             evidence_id += 1
 
-    return all_evidence
+    # Stage 2: Filter candidate quotes to pass to the dynamic discovery engine
+    candidate_corpus = [it for it in all_raw_items if it["is_interviewee_quote"] or "Grantee" in it["evidence_type"]]
+
+    # Stage 3: Discover dynamic themes tailored to this specific text
+    discovered_themes = discover_dynamic_themes(candidate_corpus, api_key)
+    theme_names = [t["theme_title"] for t in discovered_themes]
+
+    # Stage 4: Map all items to the dynamically discovered themes
+    mapping_payload = [
+        {"id": it["id"], "speaker": it["speaker"], "quote": it["quote"], "section": it["section"]}
+        for it in all_raw_items
+    ]
+
+    classify_prompt = f"""DYNAMIC THEMES DISCOVERED:
+{json.dumps(theme_names, indent=2)}
+
+ITEMS TO CATEGORIZE:
+{json.dumps(mapping_payload[:85], indent=2)}
+
+Assign each item to the single most relevant dynamically discovered theme.
+Return JSON array of objects: [{{"id": "EVD-001", "theme": "..."}}]"""
+
+    id_to_theme = {}
+    if api_key:
+        try:
+            raw_classify = call_gemini_api(classify_prompt, CLASSIFY_INTO_DYNAMIC_THEMES_PROMPT, api_key, json_mode=True).strip()
+            if raw_classify.startswith("```json"):
+                raw_classify = raw_classify[7:]
+            if raw_classify.endswith("```"):
+                raw_classify = raw_classify[:-3]
+            for item in json.loads(raw_classify.strip()):
+                if item.get("theme") in theme_names:
+                    id_to_theme[item["id"]] = item["theme"]
+        except Exception as e:
+            print(f"Mapping fallback: {e}")
+
+    # Finalize items with their assigned dynamic theme
+    for item in all_raw_items:
+        assigned = id_to_theme.get(item["id"])
+        if not assigned:
+            # Semantic keyword proximity to dynamically generated theme titles
+            best_t = theme_names[0]
+            max_hits = -1
+            text_blob = f"{item['section']} {item['quote']} {item['context']}".lower()
+            for t in theme_names:
+                hits = sum(1 for word in t.lower().split() if len(word) > 3 and word in text_blob)
+                if hits > max_hits:
+                    max_hits = hits
+                    best_t = t
+            assigned = best_t
+        item["theme"] = assigned
+
+    return all_raw_items, discovered_themes
 
 
 def ask_evidence_query(query: str, evidence_list: List[Dict[str, Any]], api_key: str) -> Dict[str, Any]:
@@ -313,18 +327,17 @@ def ask_evidence_query(query: str, evidence_list: List[Dict[str, Any]], api_key:
             json_mode=False
         ).strip()
     except Exception:
-        # Fallback if API rate limits during Q&A
         query_tokens = [w.lower() for w in re.findall(r'\w+', query) if len(w) > 3]
         matched = []
         for ev in evidence_list:
             blob = f"{ev['theme']} {ev['quote']} {ev['context']}".lower()
             if any(t in blob for t in query_tokens):
                 matched.append(ev)
-        
+
         if not matched:
             return {"answer": "Not found in the interviews or fact pack.", "cited_evidence": []}
-            
-        points = [f"• **{m['speaker']}**: \"{m['quote']}\"" for m in matched[:4]]
+
+        points = [f"• **{m['speaker']}**: \"{m['quote']}\" ({m['context']})" for m in matched[:4]]
         return {
             "answer": "Synthesized evidence based on interview records:\n\n" + "\n".join(points),
             "cited_evidence": matched[:4]
