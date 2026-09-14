@@ -1,7 +1,7 @@
 """
 app.py
 Streamlit web application for the GNP Evidence Pipeline.
-Uses preconfigured backend secrets for seamless client-ready evaluation.
+Features subheading-aware speaker attribution, quote filtering, and audit tracking.
 """
 
 import streamlit as st
@@ -15,12 +15,10 @@ st.set_page_config(
 )
 
 st.title("⚖️ GNP Foundation — Qualitative Evidence & Verification Engine")
-st.caption("Deterministic quote extraction, linguistic authenticity classification, and quote verification.")
+st.caption("Subheading-aware quote extraction, authentic speaker attribution, and deterministic verification.")
 
-# Retrieve API key securely from Streamlit Secrets
 api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
 
-# Sidebar: File Upload Only
 st.sidebar.header("Evidence Ingestion")
 uploaded_files = st.sidebar.file_uploader(
     "Upload Interview Files (.txt)",
@@ -37,19 +35,19 @@ if st.sidebar.button("Run Evidence Pipeline", type="primary"):
     elif not uploaded_files:
         st.sidebar.error("Please upload at least one .txt interview file.")
     else:
-        with st.spinner("Classifying spoken quotes vs. paraphrases and running verification audits..."):
+        with st.spinner("Classifying subheadings, attributing speakers, and verifying text..."):
             try:
                 files_dict = {f.name: f.read().decode("utf-8") for f in uploaded_files}
                 st.session_state.evidence_data = run_extraction_pipeline(files_dict, api_key)
-                quotes_count = sum(1 for e in st.session_state.evidence_data if e["is_quote"])
+                quotes_count = sum(1 for e in st.session_state.evidence_data if e["is_interviewee_quote"])
                 st.sidebar.success(
                     f"Extracted {len(st.session_state.evidence_data)} total items "
-                    f"({quotes_count} verified quotes, {len(st.session_state.evidence_data) - quotes_count} notetaker paraphrases)!"
+                    f"({quotes_count} verified interviewee quotes, "
+                    f"{len(st.session_state.evidence_data) - quotes_count} proxy notes/summaries)!"
                 )
             except Exception as ex:
                 st.error(f"Pipeline Error: {str(ex)}")
 
-# Main Tabs
 tab1, tab2, tab3 = st.tabs(["📊 Evidence Matrix", "🔍 Verification Report", "💬 Grounded Q&A"])
 
 # Tab 1: Evidence Matrix
@@ -68,10 +66,9 @@ with tab1:
             evidence_view = st.selectbox(
                 "Filter Evidence Type",
                 [
-                    "True Quotes Only (Spoken/Direct)",
-                    "Direct Quotes Only (\"...\")",
-                    "Spoken Verbatims Only (1st person)",
-                    "All Items (Incl. Paraphrases)"
+                    "Interviewee Quotes Only",
+                    "Grantee Voice / Feedback",
+                    "All Evidence (Incl. Notes)"
                 ]
             )
         with col4:
@@ -83,12 +80,10 @@ with tab1:
         if speaker_choice != "All":
             filtered = filtered[filtered["speaker"] == speaker_choice]
 
-        if evidence_view == "True Quotes Only (Spoken/Direct)":
-            filtered = filtered[filtered["is_quote"] == True]
-        elif evidence_view == "Direct Quotes Only (\"...\")":
-            filtered = filtered[filtered["evidence_type"] == "Direct Quote"]
-        elif evidence_view == "Spoken Verbatims Only (1st person)":
-            filtered = filtered[filtered["evidence_type"] == "Spoken Verbatim"]
+        if evidence_view == "Interviewee Quotes Only":
+            filtered = filtered[filtered["is_interviewee_quote"] == True]
+        elif evidence_view == "Grantee Voice / Feedback":
+            filtered = filtered[filtered["evidence_type"].isin(["Grantee Voice", "Grantee Summary"])]
 
         if verified_filter:
             filtered = filtered[filtered["verified"] == True]
@@ -105,25 +100,25 @@ with tab2:
         st.info("Run the pipeline to generate an integrity audit report.")
     else:
         df = pd.DataFrame(st.session_state.evidence_data)
-        quotes_df = df[df["is_quote"] == True]
-        paraphrase_df = df[df["is_quote"] == False]
+        quotes_df = df[df["is_interviewee_quote"] == True]
+        proxy_df = df[df["is_interviewee_quote"] == False]
 
         total_quotes = len(quotes_df)
         verified_quotes = int(quotes_df["verified"].sum())
         quote_pass_rate = round((verified_quotes / total_quotes) * 100, 1) if total_quotes > 0 else 0
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Spoken Quotes Audited", total_quotes)
+        m1.metric("Interviewee Quotes Audited", total_quotes)
         m2.metric("Verified Word-for-Word", verified_quotes)
-        m3.metric("Notetaker Paraphrases Separated", len(paraphrase_df))
-        m4.metric("Quote Integrity Pass Rate", f"{quote_pass_rate}%")
+        m3.metric("Grantee & Notetaker Records Separated", len(proxy_df))
+        m4.metric("Executive Quote Integrity", f"{quote_pass_rate}%")
 
         st.divider()
-        st.subheader("Audited Quotes (Natural Voice & Explicit Quotes)")
+        st.subheader("Audited Interviewee Verbatims")
         for _, row in quotes_df.iterrows():
             badge = "✅ VERIFIED" if row["verified"] else "❌ FAILED"
             with st.expander(f"{row['id']} | {row['speaker']} [{row['evidence_type']}] — {badge}"):
-                st.write(f"**Extracted Spoken Quote:** \"{row['quote']}\"")
+                st.write(f"**Verbatim Quote:** \"{row['quote']}\"")
                 st.write(f"**Source Document:** `{row['file']}` ({row['context']})")
                 st.write(f"**Verification Match:** `{row['match_type']}` (Similarity: {row['similarity_score']})")
 
@@ -143,7 +138,7 @@ with tab3:
         elif not query:
             st.warning("Please type a question.")
         else:
-            with st.spinner("Synthesizing answer grounded exclusively in verified spoken quotes..."):
+            with st.spinner("Synthesizing answer grounded in verified evidence..."):
                 try:
                     res = ask_evidence_query(query, st.session_state.evidence_data, api_key)
                     st.markdown("### Synthesized Finding")
